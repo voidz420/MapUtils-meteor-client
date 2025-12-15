@@ -3,7 +3,7 @@ package dev.voidz.maputils.modules;
 import dev.voidz.maputils.MapUtils;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
-import meteordevelopment.meteorclient.settings.IntSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -13,8 +13,8 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.item.FilledMapItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
+import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -24,12 +24,19 @@ import net.minecraft.util.math.Direction;
 public class FastMap extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
 
-    private final Setting<Integer> placeDelay = sgGeneral.add(new IntSetting.Builder()
+    private final Setting<Double> placeDelay = sgGeneral.add(new DoubleSetting.Builder()
         .name("place-delay")
-        .description("Delay in ticks between placements.")
-        .defaultValue(0)
-        .min(0)
-        .sliderRange(0, 10)
+        .description("Delay between placements in milliseconds.")
+        .defaultValue(50.0)
+        .min(0.0)
+        .sliderRange(0.0, 500.0)
+        .build()
+    );
+
+    private final Setting<Boolean> silentSwap = sgGeneral.add(new BoolSetting.Builder()
+        .name("silent-swap")
+        .description("Swap to item frame without visually changing hotbar slot (packet-based).")
+        .defaultValue(false)
         .build()
     );
 
@@ -47,25 +54,48 @@ public class FastMap extends Module {
         .build()
     );
 
-    private int tickDelay = 0;
+    private long lastPlaceTime = 0;
     private boolean wasPressed = false;
+    
+    // For delayed map placement
+    private boolean pendingMapPlace = false;
+    private BlockHitResult pendingHitResult = null;
+    private long mapPlaceTime = 0;
+    private int originalSlot = -1;
 
     public FastMap() {
-        super(MapUtils.CATEGORY, "fast-map", "Hold a map and click to silently place item frame + map in one action. Uses offhand swap for Grim bypass.");
+        super(MapUtils.CATEGORY, "fast-map", "Hold a map and click to place item frame + map in one action.");
     }
 
     @Override
     public void onActivate() {
-        tickDelay = 0;
+        lastPlaceTime = 0;
         wasPressed = false;
+        pendingMapPlace = false;
+        pendingHitResult = null;
+        originalSlot = -1;
+    }
+
+    @Override
+    public void onDeactivate() {
+        pendingMapPlace = false;
+        pendingHitResult = null;
+        originalSlot = -1;
     }
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.player == null || mc.world == null) return;
 
-        if (tickDelay < placeDelay.get()) {
-            tickDelay++;
+        // Handle pending map placement
+        if (pendingMapPlace && pendingHitResult != null) {
+            long currentTime = System.currentTimeMillis();
+            if (currentTime - mapPlaceTime >= 50) { // 50ms delay for frame to spawn
+                placeMap(pendingHitResult);
+                pendingMapPlace = false;
+                pendingHitResult = null;
+            }
+            return;
         }
 
         // Check if holding a filled map in main hand
@@ -106,77 +136,81 @@ public class FastMap extends Module {
             return;
         }
 
+        // Check delay
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastPlaceTime < placeDelay.get()) {
+            wasPressed = isPressed;
+            return;
+        }
+
         // On click (not hold)
-        if (isPressed && !wasPressed && tickDelay >= placeDelay.get()) {
+        if (isPressed && !wasPressed) {
             placeFrameAndMap(blockHitResult, frameResult.slot());
-            tickDelay = 0;
+            lastPlaceTime = currentTime;
         }
 
         wasPressed = isPressed;
     }
 
     private void placeFrameAndMap(BlockHitResult blockHitResult, int frameSlot) {
-        // Save current slot
-        int currentSlot = mc.player.getInventory().getSelectedSlot();
+        originalSlot = mc.player.getInventory().getSelectedSlot();
 
-        // Step 1: Swap item frame to offhand silently
-        mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(
-            PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
-            BlockPos.ORIGIN,
-            Direction.DOWN
-        ));
+        if (silentSwap.get()) {
+            // Silent swap: send slot packet without changing client slot
+            mc.getNetworkHandler().sendPacket(new UpdateSelectedSlotC2SPacket(frameSlot));
+            
+            // Place item frame
+            mc.getNetworkHandler().sendPacket(new PlayerInteractBlockC2SPacket(
+                Hand.MAIN_HAND,
+                blockHitResult,
+                0
+            ));
 
-        // Step 2: Swap to item frame slot
-        InvUtils.swap(frameSlot, false);
+            // Swap back silently
+            mc.getNetworkHandler().sendPacket(new UpdateSelectedSlotC2SPacket(originalSlot));
+        } else {
+            // Normal swap: visually switch slots
+            InvUtils.swap(frameSlot, false);
 
-        // Step 3: Swap again (now item frame is in offhand)
-        mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(
-            PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
-            BlockPos.ORIGIN,
-            Direction.DOWN
-        ));
+            // Place item frame
+            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, blockHitResult);
 
-        // Step 4: Swap back to original slot (map)
-        InvUtils.swap(currentSlot, false);
-
-        // Step 5: Place item frame from offhand
-        mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(
-            Hand.OFF_HAND,
-            blockHitResult,
-            mc.player.currentScreenHandler.getRevision() + 2
-        ));
-
-        // Step 6: Swap offhand back (restore original offhand)
-        mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(
-            PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
-            BlockPos.ORIGIN,
-            Direction.DOWN
-        ));
+            // Swap back to map
+            InvUtils.swap(originalSlot, false);
+        }
 
         if (swing.get()) {
             mc.player.swingHand(Hand.MAIN_HAND);
         }
 
-        // Step 7: Schedule map placement for next tick (frame needs to spawn)
-        mc.execute(() -> {
-            // Place the map on the item frame
-            BlockPos framePos = blockHitResult.getBlockPos().offset(blockHitResult.getSide());
-            BlockHitResult mapHitResult = new BlockHitResult(
-                framePos.toCenterPos(),
-                blockHitResult.getSide().getOpposite(),
-                framePos,
-                false
-            );
+        // Schedule map placement
+        pendingMapPlace = true;
+        pendingHitResult = blockHitResult;
+        mapPlaceTime = System.currentTimeMillis();
+    }
 
-            mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(
-                Hand.MAIN_HAND,
-                mapHitResult,
-                mc.player.currentScreenHandler.getRevision() + 2
-            ));
+    private void placeMap(BlockHitResult originalHitResult) {
+        if (mc.player == null || mc.world == null) return;
 
-            if (swing.get()) {
-                mc.player.swingHand(Hand.MAIN_HAND);
-            }
-        });
+        // Make sure we're holding the map
+        ItemStack mainHand = mc.player.getMainHandStack();
+        if (!(mainHand.getItem() instanceof FilledMapItem)) return;
+
+        // Calculate where the item frame should be
+        BlockPos framePos = originalHitResult.getBlockPos().offset(originalHitResult.getSide());
+        
+        BlockHitResult mapHitResult = new BlockHitResult(
+            framePos.toCenterPos(),
+            originalHitResult.getSide().getOpposite(),
+            framePos,
+            false
+        );
+
+        // Place the map
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, mapHitResult);
+
+        if (swing.get()) {
+            mc.player.swingHand(Hand.MAIN_HAND);
+        }
     }
 }
