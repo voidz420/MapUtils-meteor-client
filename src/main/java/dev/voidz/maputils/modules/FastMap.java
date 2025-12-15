@@ -10,15 +10,17 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.item.FilledMapItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
-import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 
 public class FastMap extends Module {
@@ -30,13 +32,6 @@ public class FastMap extends Module {
         .defaultValue(50.0)
         .min(0.0)
         .sliderRange(0.0, 500.0)
-        .build()
-    );
-
-    private final Setting<Boolean> silentSwap = sgGeneral.add(new BoolSetting.Builder()
-        .name("silent-swap")
-        .description("Swap to item frame without visually changing hotbar slot (packet-based).")
-        .defaultValue(false)
         .build()
     );
 
@@ -58,10 +53,11 @@ public class FastMap extends Module {
     private boolean wasPressed = false;
     
     // For delayed map placement
-    private boolean pendingMapPlace = false;
-    private BlockHitResult pendingHitResult = null;
-    private long mapPlaceTime = 0;
-    private int originalSlot = -1;
+    private boolean waitingForFrame = false;
+    private BlockPos expectedFramePos = null;
+    private int mapSlot = -1;
+    private int ticksWaited = 0;
+    private static final int MAX_WAIT_TICKS = 20; // 1 second max wait
 
     public FastMap() {
         super(MapUtils.CATEGORY, "fast-map", "Hold a map and click to place item frame + map in one action.");
@@ -71,29 +67,41 @@ public class FastMap extends Module {
     public void onActivate() {
         lastPlaceTime = 0;
         wasPressed = false;
-        pendingMapPlace = false;
-        pendingHitResult = null;
-        originalSlot = -1;
+        resetPendingState();
     }
 
     @Override
     public void onDeactivate() {
-        pendingMapPlace = false;
-        pendingHitResult = null;
-        originalSlot = -1;
+        resetPendingState();
+    }
+
+    private void resetPendingState() {
+        waitingForFrame = false;
+        expectedFramePos = null;
+        mapSlot = -1;
+        ticksWaited = 0;
     }
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.player == null || mc.world == null) return;
 
-        // Handle pending map placement
-        if (pendingMapPlace && pendingHitResult != null) {
-            long currentTime = System.currentTimeMillis();
-            if (currentTime - mapPlaceTime >= 50) { // 50ms delay for frame to spawn
-                placeMap(pendingHitResult);
-                pendingMapPlace = false;
-                pendingHitResult = null;
+        // Handle pending map placement - wait for item frame to spawn
+        if (waitingForFrame && expectedFramePos != null) {
+            ticksWaited++;
+            
+            // Check if item frame spawned at expected position
+            ItemFrameEntity frame = findItemFrameAt(expectedFramePos);
+            if (frame != null) {
+                // Frame found, place the map
+                placeMapOnFrame(frame);
+                resetPendingState();
+                return;
+            }
+            
+            // Timeout
+            if (ticksWaited >= MAX_WAIT_TICKS) {
+                resetPendingState();
             }
             return;
         }
@@ -145,69 +153,65 @@ public class FastMap extends Module {
 
         // On click (not hold)
         if (isPressed && !wasPressed) {
-            placeFrameAndMap(blockHitResult, frameResult.slot());
+            placeFrame(blockHitResult, frameResult.slot());
             lastPlaceTime = currentTime;
         }
 
         wasPressed = isPressed;
     }
 
-    private void placeFrameAndMap(BlockHitResult blockHitResult, int frameSlot) {
-        originalSlot = mc.player.getInventory().getSelectedSlot();
+    private void placeFrame(BlockHitResult blockHitResult, int frameSlot) {
+        int currentSlot = mc.player.getInventory().getSelectedSlot();
 
-        if (silentSwap.get()) {
-            // Silent swap: send slot packet without changing client slot
-            mc.getNetworkHandler().sendPacket(new UpdateSelectedSlotC2SPacket(frameSlot));
-            
-            // Place item frame
-            mc.getNetworkHandler().sendPacket(new PlayerInteractBlockC2SPacket(
-                Hand.MAIN_HAND,
-                blockHitResult,
-                0
-            ));
+        // Swap to item frame
+        InvUtils.swap(frameSlot, false);
 
-            // Swap back silently
-            mc.getNetworkHandler().sendPacket(new UpdateSelectedSlotC2SPacket(originalSlot));
-        } else {
-            // Normal swap: visually switch slots
-            InvUtils.swap(frameSlot, false);
-
-            // Place item frame
-            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, blockHitResult);
-
-            // Swap back to map
-            InvUtils.swap(originalSlot, false);
-        }
+        // Place item frame
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, blockHitResult);
 
         if (swing.get()) {
             mc.player.swingHand(Hand.MAIN_HAND);
         }
 
-        // Schedule map placement
-        pendingMapPlace = true;
-        pendingHitResult = blockHitResult;
-        mapPlaceTime = System.currentTimeMillis();
+        // Swap back to map
+        InvUtils.swap(currentSlot, false);
+
+        // Set up waiting for frame to spawn
+        expectedFramePos = blockHitResult.getBlockPos().offset(blockHitResult.getSide());
+        mapSlot = currentSlot;
+        waitingForFrame = true;
+        ticksWaited = 0;
     }
 
-    private void placeMap(BlockHitResult originalHitResult) {
-        if (mc.player == null || mc.world == null) return;
+    private ItemFrameEntity findItemFrameAt(BlockPos pos) {
+        Box searchBox = new Box(pos).expand(0.5);
+        for (Entity entity : mc.world.getEntities()) {
+            if (entity instanceof ItemFrameEntity frame) {
+                if (searchBox.contains(frame.getPos())) {
+                    // Check if frame is empty (no item in it yet)
+                    if (frame.getHeldItemStack().isEmpty()) {
+                        return frame;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private void placeMapOnFrame(ItemFrameEntity frame) {
+        if (mc.player == null) return;
 
         // Make sure we're holding the map
         ItemStack mainHand = mc.player.getMainHandStack();
-        if (!(mainHand.getItem() instanceof FilledMapItem)) return;
+        if (!(mainHand.getItem() instanceof FilledMapItem)) {
+            // Try to swap to map slot if we saved it
+            if (mapSlot != -1) {
+                InvUtils.swap(mapSlot, false);
+            }
+        }
 
-        // Calculate where the item frame should be
-        BlockPos framePos = originalHitResult.getBlockPos().offset(originalHitResult.getSide());
-        
-        BlockHitResult mapHitResult = new BlockHitResult(
-            framePos.toCenterPos(),
-            originalHitResult.getSide().getOpposite(),
-            framePos,
-            false
-        );
-
-        // Place the map
-        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, mapHitResult);
+        // Interact with the item frame to place the map
+        mc.interactionManager.interactEntity(mc.player, frame, Hand.MAIN_HAND);
 
         if (swing.get()) {
             mc.player.swingHand(Hand.MAIN_HAND);
