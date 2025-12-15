@@ -10,6 +10,7 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.decoration.ItemFrameEntity;
@@ -206,12 +207,16 @@ public class FastMap extends Module {
         }
 
         if (frame != null) {
-            // Interact with the frame entity directly
-            mc.interactionManager.interactEntity(mc.player, frame, Hand.MAIN_HAND);
-            
-            if (swing.get()) {
-                mc.player.swingHand(Hand.MAIN_HAND);
-            }
+            // Rotate to the frame and interact
+            final ItemFrameEntity targetFrame = frame;
+            Vec3d frameCenter = targetFrame.getPos();
+            Rotations.rotate(Rotations.getYaw(frameCenter), Rotations.getPitch(frameCenter), () -> {
+                mc.interactionManager.interactEntity(mc.player, targetFrame, Hand.MAIN_HAND);
+                
+                if (swing.get()) {
+                    mc.player.swingHand(Hand.MAIN_HAND);
+                }
+            });
         }
     }
 }
