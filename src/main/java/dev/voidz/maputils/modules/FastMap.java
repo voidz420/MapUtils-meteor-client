@@ -17,12 +17,16 @@ import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.item.FilledMapItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerInteractEntityC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 
 public class FastMap extends Module {
@@ -56,6 +60,13 @@ public class FastMap extends Module {
     private final Setting<Boolean> swing = sgGeneral.add(new BoolSetting.Builder()
         .name("swing")
         .description("Swing hand when placing.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
+        .name("rotate")
+        .description("Rotate to the item frame when placing map.")
         .defaultValue(true)
         .build()
     );
@@ -213,18 +224,20 @@ public class FastMap extends Module {
 
         // Calculate rotation to frame
         Vec3d frameCenter = frame.getPos();
-        double yaw = Rotations.getYaw(frameCenter);
-        double pitch = Rotations.getPitch(frameCenter);
+        float yaw = (float) Rotations.getYaw(frameCenter);
+        float pitch = (float) Rotations.getPitch(frameCenter);
 
-        // Rotate and interact
-        Rotations.rotate(yaw, pitch, () -> {
-            if (mc.player != null && mc.interactionManager != null) {
-                mc.interactionManager.interactEntity(mc.player, frame, Hand.MAIN_HAND);
-                if (swing.get()) {
-                    mc.player.swingHand(Hand.MAIN_HAND);
-                }
-            }
-        });
+        // Send rotation packet if enabled
+        if (rotate.get()) {
+            mc.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, mc.player.isOnGround(), mc.player.horizontalCollision));
+        }
+
+        // Send interact packet directly
+        mc.getNetworkHandler().sendPacket(PlayerInteractEntityC2SPacket.interact(frame, mc.player.isSneaking(), Hand.MAIN_HAND));
+
+        if (swing.get()) {
+            mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
+        }
 
         return true;
     }
