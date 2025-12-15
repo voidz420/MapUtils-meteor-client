@@ -227,7 +227,8 @@ public class FastMap extends Module {
         }
 
         if (mainHand.getItem() instanceof FilledMapItem) {
-            // Interact with the frame
+            // Interact with the frame twice
+            mc.interactionManager.interactEntity(mc.player, targetFrame, Hand.MAIN_HAND);
             mc.interactionManager.interactEntity(mc.player, targetFrame, Hand.MAIN_HAND);
 
             if (swing.get()) {
