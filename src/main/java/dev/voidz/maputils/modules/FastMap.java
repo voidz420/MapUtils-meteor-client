@@ -4,6 +4,7 @@ import dev.voidz.maputils.MapUtils;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.DoubleSetting;
+import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -17,11 +18,11 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
-import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 
 public class FastMap extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -32,6 +33,15 @@ public class FastMap extends Module {
         .defaultValue(50.0)
         .min(0.0)
         .sliderRange(0.0, 500.0)
+        .build()
+    );
+
+    private final Setting<Integer> mapDelay = sgGeneral.add(new IntSetting.Builder()
+        .name("map-delay")
+        .description("Ticks to wait before placing map after frame (increase if map doesn't place).")
+        .defaultValue(2)
+        .min(1)
+        .sliderRange(1, 10)
         .build()
     );
 
@@ -53,11 +63,9 @@ public class FastMap extends Module {
     private boolean wasPressed = false;
     
     // For delayed map placement
-    private boolean waitingForFrame = false;
-    private BlockPos expectedFramePos = null;
-    private int mapSlot = -1;
-    private int ticksWaited = 0;
-    private static final int MAX_WAIT_TICKS = 20; // 1 second max wait
+    private int ticksToWait = 0;
+    private BlockPos framePos = null;
+    private int savedMapSlot = -1;
 
     public FastMap() {
         super(MapUtils.CATEGORY, "fast-map", "Hold a map and click to place item frame + map in one action.");
@@ -67,41 +75,29 @@ public class FastMap extends Module {
     public void onActivate() {
         lastPlaceTime = 0;
         wasPressed = false;
-        resetPendingState();
+        ticksToWait = 0;
+        framePos = null;
+        savedMapSlot = -1;
     }
 
     @Override
     public void onDeactivate() {
-        resetPendingState();
-    }
-
-    private void resetPendingState() {
-        waitingForFrame = false;
-        expectedFramePos = null;
-        mapSlot = -1;
-        ticksWaited = 0;
+        ticksToWait = 0;
+        framePos = null;
+        savedMapSlot = -1;
     }
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.player == null || mc.world == null) return;
 
-        // Handle pending map placement - wait for item frame to spawn
-        if (waitingForFrame && expectedFramePos != null) {
-            ticksWaited++;
-            
-            // Check if item frame spawned at expected position
-            ItemFrameEntity frame = findItemFrameAt(expectedFramePos);
-            if (frame != null) {
-                // Frame found, place the map
-                placeMapOnFrame(frame);
-                resetPendingState();
-                return;
-            }
-            
-            // Timeout
-            if (ticksWaited >= MAX_WAIT_TICKS) {
-                resetPendingState();
+        // Handle pending map placement
+        if (ticksToWait > 0) {
+            ticksToWait--;
+            if (ticksToWait == 0 && framePos != null) {
+                tryPlaceMap();
+                framePos = null;
+                savedMapSlot = -1;
             }
             return;
         }
@@ -161,7 +157,7 @@ public class FastMap extends Module {
     }
 
     private void placeFrame(BlockHitResult blockHitResult, int frameSlot) {
-        int currentSlot = mc.player.getInventory().getSelectedSlot();
+        savedMapSlot = mc.player.getInventory().getSelectedSlot();
 
         // Swap to item frame
         InvUtils.swap(frameSlot, false);
@@ -174,47 +170,48 @@ public class FastMap extends Module {
         }
 
         // Swap back to map
-        InvUtils.swap(currentSlot, false);
+        InvUtils.swap(savedMapSlot, false);
 
-        // Set up waiting for frame to spawn
-        expectedFramePos = blockHitResult.getBlockPos().offset(blockHitResult.getSide());
-        mapSlot = currentSlot;
-        waitingForFrame = true;
-        ticksWaited = 0;
+        // Store frame position and start countdown
+        framePos = blockHitResult.getBlockPos().offset(blockHitResult.getSide());
+        ticksToWait = mapDelay.get();
     }
 
-    private ItemFrameEntity findItemFrameAt(BlockPos pos) {
-        Box searchBox = new Box(pos).expand(0.5);
-        for (Entity entity : mc.world.getEntities()) {
-            if (entity instanceof ItemFrameEntity frame) {
-                if (searchBox.contains(frame.getPos())) {
-                    // Check if frame is empty (no item in it yet)
-                    if (frame.getHeldItemStack().isEmpty()) {
-                        return frame;
-                    }
-                }
-            }
-        }
-        return null;
-    }
-
-    private void placeMapOnFrame(ItemFrameEntity frame) {
-        if (mc.player == null) return;
+    private void tryPlaceMap() {
+        if (mc.player == null || mc.world == null || framePos == null) return;
 
         // Make sure we're holding the map
         ItemStack mainHand = mc.player.getMainHandStack();
         if (!(mainHand.getItem() instanceof FilledMapItem)) {
-            // Try to swap to map slot if we saved it
-            if (mapSlot != -1) {
-                InvUtils.swap(mapSlot, false);
+            if (savedMapSlot != -1) {
+                InvUtils.swap(savedMapSlot, false);
+            }
+            mainHand = mc.player.getMainHandStack();
+            if (!(mainHand.getItem() instanceof FilledMapItem)) return;
+        }
+
+        // Find the item frame entity
+        ItemFrameEntity frame = null;
+        Box searchBox = new Box(framePos).expand(0.5);
+        
+        for (Entity entity : mc.world.getEntities()) {
+            if (entity instanceof ItemFrameEntity itemFrame) {
+                if (searchBox.intersects(entity.getBoundingBox())) {
+                    if (itemFrame.getHeldItemStack().isEmpty()) {
+                        frame = itemFrame;
+                        break;
+                    }
+                }
             }
         }
 
-        // Interact with the item frame to place the map
-        mc.interactionManager.interactEntity(mc.player, frame, Hand.MAIN_HAND);
-
-        if (swing.get()) {
-            mc.player.swingHand(Hand.MAIN_HAND);
+        if (frame != null) {
+            // Interact with the frame entity directly
+            mc.interactionManager.interactEntity(mc.player, frame, Hand.MAIN_HAND);
+            
+            if (swing.get()) {
+                mc.player.swingHand(Hand.MAIN_HAND);
+            }
         }
     }
 }
