@@ -18,15 +18,13 @@ import net.minecraft.item.FilledMapItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
-import net.minecraft.network.packet.c2s.play.PlayerInteractEntityC2SPacket;
-import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 
 public class FastMap extends Module {
@@ -186,11 +184,15 @@ public class FastMap extends Module {
         // Swap to item frame
         InvUtils.swap(frameSlot, false);
 
-        // Place item frame
-        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, blockHitResult);
+        // Place item frame using packet
+        mc.getNetworkHandler().sendPacket(new PlayerInteractBlockC2SPacket(
+            Hand.MAIN_HAND,
+            blockHitResult,
+            0
+        ));
 
         if (swing.get()) {
-            mc.player.swingHand(Hand.MAIN_HAND);
+            mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
         }
 
         // Swap back to map
@@ -222,21 +224,18 @@ public class FastMap extends Module {
             return false; // Frame not spawned yet, will retry
         }
 
-        // Calculate rotation to frame
+        // Rotate to frame and interact manually
         Vec3d frameCenter = frame.getPos();
-        float yaw = (float) Rotations.getYaw(frameCenter);
-        float pitch = (float) Rotations.getPitch(frameCenter);
-
-        // Send rotation packet if enabled
+        
         if (rotate.get()) {
-            mc.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, mc.player.isOnGround(), mc.player.horizontalCollision));
+            Rotations.rotate(Rotations.getYaw(frameCenter), Rotations.getPitch(frameCenter));
         }
 
-        // Send interact packet directly
-        mc.getNetworkHandler().sendPacket(PlayerInteractEntityC2SPacket.interact(frame, mc.player.isSneaking(), Hand.MAIN_HAND));
+        // Use normal interaction manager to place the map
+        mc.interactionManager.interactEntity(mc.player, frame, Hand.MAIN_HAND);
 
         if (swing.get()) {
-            mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
+            mc.player.swingHand(Hand.MAIN_HAND);
         }
 
         return true;
