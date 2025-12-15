@@ -78,6 +78,10 @@ public class FastMap extends Module {
     private int savedMapSlot = -1;
     private int retryCount = 0;
     private static final int MAX_RETRIES = 10;
+    
+    // For rotation then interact
+    private ItemFrameEntity pendingFrame = null;
+    private int rotationTicks = 0;
 
     public FastMap() {
         super(MapUtils.CATEGORY, "fast-map", "Hold a map and click to place item frame + map in one action.");
@@ -100,11 +104,37 @@ public class FastMap extends Module {
         framePos = null;
         savedMapSlot = -1;
         retryCount = 0;
+        pendingFrame = null;
+        rotationTicks = 0;
     }
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.player == null || mc.world == null) return;
+
+        // Handle pending interaction after rotation
+        if (pendingFrame != null) {
+            rotationTicks++;
+            
+            // Keep rotating
+            Vec3d frameCenter = pendingFrame.getPos();
+            if (rotate.get()) {
+                Rotations.rotate(Rotations.getYaw(frameCenter), Rotations.getPitch(frameCenter));
+            }
+            
+            // After 2 ticks of rotation, interact
+            if (rotationTicks >= 2) {
+                mc.interactionManager.interactEntity(mc.player, pendingFrame, Hand.MAIN_HAND);
+                
+                if (swing.get()) {
+                    mc.player.swingHand(Hand.MAIN_HAND);
+                }
+                
+                pendingFrame = null;
+                rotationTicks = 0;
+            }
+            return;
+        }
 
         // Handle pending map placement - keep trying until we find the frame
         if (framePos != null) {
@@ -113,10 +143,12 @@ public class FastMap extends Module {
                 return;
             }
             
-            // Try to place map
-            boolean success = tryPlaceMap();
+            // Try to find frame and start rotation
+            boolean success = tryFindFrameAndRotate();
             if (success || retryCount >= MAX_RETRIES) {
-                resetState();
+                framePos = null;
+                savedMapSlot = -1;
+                retryCount = 0;
             } else {
                 retryCount++;
                 ticksToWait = 1; // Try again next tick
@@ -204,7 +236,7 @@ public class FastMap extends Module {
         retryCount = 0;
     }
 
-    private boolean tryPlaceMap() {
+    private boolean tryFindFrameAndRotate() {
         if (mc.player == null || mc.world == null || framePos == null) return false;
 
         // Make sure we're holding the map
@@ -224,18 +256,14 @@ public class FastMap extends Module {
             return false; // Frame not spawned yet, will retry
         }
 
-        // Rotate to frame and interact manually
-        Vec3d frameCenter = frame.getPos();
+        // Start rotation, will interact after a couple ticks
+        pendingFrame = frame;
+        rotationTicks = 0;
         
+        // Start rotating immediately
+        Vec3d frameCenter = frame.getPos();
         if (rotate.get()) {
             Rotations.rotate(Rotations.getYaw(frameCenter), Rotations.getPitch(frameCenter));
-        }
-
-        // Use normal interaction manager to place the map
-        mc.interactionManager.interactEntity(mc.player, frame, Hand.MAIN_HAND);
-
-        if (swing.get()) {
-            mc.player.swingHand(Hand.MAIN_HAND);
         }
 
         return true;
