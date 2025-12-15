@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "maputils",
+  "version": "${version}",
+  "name": "Mappart Utils",
+  "description": "A Meteor Client addon with utilities for map art creation on anarchy servers.",
+  "authors": [
+    "voidz420"
+  ],
+  "contact": {
+    "repo": "https://github.com/voidz420/MapUtils-meteor-client",
+    "sources": "https://github.com/voidz420/MapUtils-meteor-client"
+  },
+  "license": "GPL-3.0",
+  "icon": "assets/maputils/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "meteor": [
+      "dev.voidz.maputils.MapUtils"
+    ]
+  },
+  "mixins": [
+    "maputils.mixins.json"
+  ],
+  "custom": {
+    "meteor-client:color": "139,69,19"
+  },
+  "depends": {
+    "java": ">=21",
+    "minecraft": ["${mc_version}"],
+    "meteor-client": "*"
+  }
+}
