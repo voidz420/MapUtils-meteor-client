@@ -39,10 +39,10 @@ public class FastMap extends Module {
 
     private final Setting<Integer> mapDelay = sgGeneral.add(new IntSetting.Builder()
         .name("map-delay")
-        .description("Ticks to wait before placing map after frame (increase if map doesn't place).")
-        .defaultValue(2)
+        .description("Ticks to wait before placing map after frame (increase on high ping).")
+        .defaultValue(5)
         .min(1)
-        .sliderRange(1, 10)
+        .sliderRange(1, 20)
         .build()
     );
 
@@ -67,6 +67,8 @@ public class FastMap extends Module {
     private int ticksToWait = 0;
     private BlockPos framePos = null;
     private int savedMapSlot = -1;
+    private int retryCount = 0;
+    private static final int MAX_RETRIES = 10;
 
     public FastMap() {
         super(MapUtils.CATEGORY, "fast-map", "Hold a map and click to place item frame + map in one action.");
@@ -76,29 +78,39 @@ public class FastMap extends Module {
     public void onActivate() {
         lastPlaceTime = 0;
         wasPressed = false;
-        ticksToWait = 0;
-        framePos = null;
-        savedMapSlot = -1;
+        resetState();
     }
 
     @Override
     public void onDeactivate() {
+        resetState();
+    }
+
+    private void resetState() {
         ticksToWait = 0;
         framePos = null;
         savedMapSlot = -1;
+        retryCount = 0;
     }
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.player == null || mc.world == null) return;
 
-        // Handle pending map placement
-        if (ticksToWait > 0) {
-            ticksToWait--;
-            if (ticksToWait == 0 && framePos != null) {
-                tryPlaceMap();
-                framePos = null;
-                savedMapSlot = -1;
+        // Handle pending map placement - keep trying until we find the frame
+        if (framePos != null) {
+            if (ticksToWait > 0) {
+                ticksToWait--;
+                return;
+            }
+            
+            // Try to place map
+            boolean success = tryPlaceMap();
+            if (success || retryCount >= MAX_RETRIES) {
+                resetState();
+            } else {
+                retryCount++;
+                ticksToWait = 1; // Try again next tick
             }
             return;
         }
@@ -176,10 +188,11 @@ public class FastMap extends Module {
         // Store frame position and start countdown
         framePos = blockHitResult.getBlockPos().offset(blockHitResult.getSide());
         ticksToWait = mapDelay.get();
+        retryCount = 0;
     }
 
-    private void tryPlaceMap() {
-        if (mc.player == null || mc.world == null || framePos == null) return;
+    private boolean tryPlaceMap() {
+        if (mc.player == null || mc.world == null || framePos == null) return false;
 
         // Make sure we're holding the map
         ItemStack mainHand = mc.player.getMainHandStack();
@@ -188,35 +201,46 @@ public class FastMap extends Module {
                 InvUtils.swap(savedMapSlot, false);
             }
             mainHand = mc.player.getMainHandStack();
-            if (!(mainHand.getItem() instanceof FilledMapItem)) return;
+            if (!(mainHand.getItem() instanceof FilledMapItem)) return false;
         }
 
-        // Find the item frame entity
-        ItemFrameEntity frame = null;
-        Box searchBox = new Box(framePos).expand(0.5);
+        // Find the item frame entity at the expected position
+        ItemFrameEntity frame = findEmptyFrameAt(framePos);
+        
+        if (frame == null) {
+            return false; // Frame not spawned yet, will retry
+        }
+
+        // Calculate rotation to frame
+        Vec3d frameCenter = frame.getPos();
+        double yaw = Rotations.getYaw(frameCenter);
+        double pitch = Rotations.getPitch(frameCenter);
+
+        // Rotate and interact
+        Rotations.rotate(yaw, pitch, () -> {
+            if (mc.player != null && mc.interactionManager != null) {
+                mc.interactionManager.interactEntity(mc.player, frame, Hand.MAIN_HAND);
+                if (swing.get()) {
+                    mc.player.swingHand(Hand.MAIN_HAND);
+                }
+            }
+        });
+
+        return true;
+    }
+
+    private ItemFrameEntity findEmptyFrameAt(BlockPos pos) {
+        Box searchBox = new Box(pos).expand(0.6);
         
         for (Entity entity : mc.world.getEntities()) {
             if (entity instanceof ItemFrameEntity itemFrame) {
-                if (searchBox.intersects(entity.getBoundingBox())) {
+                if (itemFrame.getBoundingBox().intersects(searchBox)) {
                     if (itemFrame.getHeldItemStack().isEmpty()) {
-                        frame = itemFrame;
-                        break;
+                        return itemFrame;
                     }
                 }
             }
         }
-
-        if (frame != null) {
-            // Rotate to the frame and interact
-            final ItemFrameEntity targetFrame = frame;
-            Vec3d frameCenter = targetFrame.getPos();
-            Rotations.rotate(Rotations.getYaw(frameCenter), Rotations.getPitch(frameCenter), () -> {
-                mc.interactionManager.interactEntity(mc.player, targetFrame, Hand.MAIN_HAND);
-                
-                if (swing.get()) {
-                    mc.player.swingHand(Hand.MAIN_HAND);
-                }
-            });
-        }
+        return null;
     }
 }
