@@ -46,6 +46,16 @@ public class FastMap extends Module {
         .build()
     );
 
+    private final Setting<Integer> interactRetries = sgGeneral.add(new IntSetting.Builder()
+        .name("interact-retries")
+        .description("How many times to send interact packet (0-10).")
+        .defaultValue(2)
+        .min(0)
+        .max(10)
+        .sliderRange(0, 10)
+        .build()
+    );
+
     private final Setting<Boolean> onlyWalls = sgGeneral.add(new BoolSetting.Builder()
         .name("only-walls")
         .description("Only place on wall surfaces (not floor/ceiling).")
@@ -227,9 +237,11 @@ public class FastMap extends Module {
         }
 
         if (mainHand.getItem() instanceof FilledMapItem) {
-            // Interact with the frame twice
-            mc.interactionManager.interactEntity(mc.player, targetFrame, Hand.MAIN_HAND);
-            mc.interactionManager.interactEntity(mc.player, targetFrame, Hand.MAIN_HAND);
+            // Interact with the frame multiple times based on setting
+            int retries = interactRetries.get();
+            for (int i = 0; i < retries; i++) {
+                mc.interactionManager.interactEntity(mc.player, targetFrame, Hand.MAIN_HAND);
+            }
 
             if (swing.get()) {
                 mc.player.swingHand(Hand.MAIN_HAND);
